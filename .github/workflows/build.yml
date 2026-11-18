@@ -1,0 +1,226 @@
+name: Build Sova APK
+on:
+  workflow_dispatch:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Sova"
+          include(":app")
+          EOF
+          mkdir -p .
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p .
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.sova.assistant"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.sova.assistant"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+              </queries>
+              <application android:label="Сова" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/sova/assistant
+          cat > app/src/main/java/com/sova/assistant/MainActivity.kt <<'EOF'
+          package com.sova.assistant
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.view.Gravity
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.Locale
+
+          class MainActivity : Activity() {
+
+              private lateinit var tts: TextToSpeech
+              private var recognizer: SpeechRecognizer? = null
+              private lateinit var said: TextView
+              private lateinit var reply: TextView
+              private lateinit var micBtn: TextView
+              private var listening = false
+
+              // русские названия -> как приложение называется в телефоне
+              private val aliases = mapOf(
+                  "тик ток" to "tiktok", "тикток" to "tiktok", "ютуб" to "youtube", "ютьюб" to "youtube",
+                  "ватсап" to "whatsapp", "вотсап" to "whatsapp", "телеграм" to "telegram", "телега" to "telegram",
+                  "инстаграм" to "instagram", "инста" to "instagram", "вконтакте" to "vk", "вк" to "vk",
+                  "карты" to "maps", "почта" to "gmail", "почту" to "gmail", "гугл" to "google",
+                  "спотифай" to "spotify", "нетфликс" to "netflix", "дискорд" to "discord", "твич" to "twitch",
+                  "камера" to "camera", "камеру" to "camera", "калькулятор" to "calculator", "часы" to "clock",
+                  "галерея" to "photos", "галерею" to "photos", "браузер" to "chrome", "хром" to "chrome",
+                  "фейсбук" to "facebook", "твиттер" to "x", "пинтерест" to "pinterest", "аливэкспресс" to "aliexpress"
+              )
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#15131C"))
+                      setPadding(dp(16), dp(40), dp(16), dp(16))
+                  }
+                  micBtn = TextView(this).apply {
+                      text = "🦉\nНажми и скажи:\n«Открой TikTok»"
+                      textSize = 22f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setPadding(dp(16), dp(36), dp(16), dp(36))
+                      background = GradientDrawable().apply {
+                          cornerRadius = dp(32).toFloat(); setColor(Color.parseColor("#7A4CFF"))
+                      }
+                      setOnClickListener { toggle() }
+                  }
+                  said = TextView(this).apply { textSize = 20f; setTextColor(Color.WHITE); setPadding(0, dp(28), 0, 0) }
+                  reply = TextView(this).apply { textSize = 18f; setTextColor(Color.parseColor("#A49FB8")); setPadding(0, dp(8), 0, 0) }
+                  root.addView(micBtn)
+                  root.addView(said)
+                  root.addView(reply)
+                  setContentView(root)
+
+                  tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts.language = Locale("ru", "RU") }
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun speak(t: String) {
+                  reply.text = "🦉 $t"
+                  tts.speak(t, TextToSpeech.QUEUE_FLUSH, null, "sova")
+              }
+
+              private fun toggle() {
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1); return
+                  }
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) { speak("На телефоне нет распознавания речи Google."); return }
+                  if (listening) { recognizer?.stopListening(); return }
+                  recognizer?.destroy()
+                  recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+                      setRecognitionListener(object : RecognitionListener {
+                          override fun onReadyForSpeech(p: Bundle?) { listening = true; micBtn.text = "🦉\nСлушаю…\nговори"; said.text = ""; reply.text = "" }
+                          override fun onResults(r: Bundle?) {
+                              val t = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
+                              said.text = "«$t»"; handle(t)
+                          }
+                          override fun onPartialResults(p: Bundle?) {
+                              p?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { said.text = "«$it»" }
+                          }
+                          override fun onError(e: Int) { speak("Не расслышала, нажми ещё раз."); reset() }
+                          override fun onEndOfSpeech() { reset() }
+                          override fun onBeginningOfSpeech() {}
+                          override fun onRmsChanged(v: Float) {}
+                          override fun onBufferReceived(b: ByteArray?) {}
+                          override fun onEvent(t: Int, p: Bundle?) {}
+                      })
+                  }
+                  recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
+                      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  })
+              }
+
+              private fun reset() { listening = false; micBtn.text = "🦉\nНажми и скажи:\n«Открой TikTok»" }
+
+              private fun handle(text: String) {
+                  val s = text.lowercase(Locale("ru")).replace("сова", "").replace(",", "").trim()
+                  val m = Regex("(открой|запусти|включи|зайди в|открыть)\\s+(.+)").find(s)
+                  if (m == null) { speak("Скажи, например: открой ютуб."); return }
+                  val q = m.groupValues[2].trim()
+                  val extra = aliases.entries.firstOrNull { q.contains(it.key) }?.value
+                  val pm = packageManager
+                  val apps = pm.queryIntentActivities(
+                      Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
+                  ).map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
+                  val hit = apps.firstOrNull { (label, _) ->
+                      val l = label.lowercase()
+                      l.length > 1 && (q.contains(l) || l.contains(q) || (extra != null && l.contains(extra)))
+                  }
+                  if (hit == null) { speak("Не нашла приложение: $q"); return }
+                  speak("Открываю ${hit.first}")
+                  Handler(Looper.getMainLooper()).postDelayed({
+                      pm.getLaunchIntentForPackage(hit.second)?.let { startActivity(it) }
+                  }, 700)
+              }
+
+              override fun onDestroy() { recognizer?.destroy(); tts.shutdown(); super.onDestroy() }
+          }
+          EOF
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sova-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
